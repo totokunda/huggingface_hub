@@ -216,7 +216,7 @@ def default_client_factory() -> httpx.Client:
     """
     Factory function to create a `httpx.Client` with the default transport.
     """
-    return httpx.Client(
+    return _HFHttpxClient(
         event_hooks={"request": [hf_request_event_hook]},
         follow_redirects=True,
         timeout=httpx.Timeout(constants.HF_HUB_DOWNLOAD_TIMEOUT, write=60.0),
@@ -232,6 +232,75 @@ def default_async_client_factory() -> httpx.AsyncClient:
         follow_redirects=True,
         timeout=httpx.Timeout(constants.HF_HUB_DOWNLOAD_TIMEOUT, write=60.0),
     )
+
+
+class _HFHttpxClient(httpx.Client):
+    """`httpx.Client` with minimal `requests`-compat kwargs.
+
+    Some downstream libraries still pass `allow_redirects=` to `.head()`/`.get()`
+    (requests-style). httpx uses `follow_redirects=` instead.
+    """
+
+    @staticmethod
+    def _pop_requests_compat_kwargs(url: Any, kwargs: dict) -> Optional[Any]:
+        """Normalize `requests`-style kwargs into httpx equivalents.
+
+        Returns an extracted proxy URL (if any) as understood by httpx.
+        """
+        # `allow_redirects` (requests) -> `follow_redirects` (httpx)
+        if "allow_redirects" in kwargs and "follow_redirects" not in kwargs:
+            kwargs["follow_redirects"] = kwargs.pop("allow_redirects")
+        else:
+            kwargs.pop("allow_redirects", None)
+
+        # `proxies` (requests) is not supported per-request in httpx.Client.
+        proxies = kwargs.pop("proxies", None)
+        if proxies is None:
+            return None
+        if isinstance(proxies, dict):
+            url_str = str(url)
+            if url_str.startswith("https://") and "https" in proxies:
+                return proxies["https"]
+            if url_str.startswith("http://") and "http" in proxies:
+                return proxies["http"]
+            return proxies.get("all") or proxies.get("https") or proxies.get("http")
+        return proxies
+
+    def request(self, method: str, url: Any, *args, **kwargs) -> httpx.Response:
+        proxy = self._pop_requests_compat_kwargs(url, kwargs)
+        if proxy is None:
+            return super().request(method, url, *args, **kwargs)
+
+        # If a per-request proxy is provided, make a one-off client configured with that proxy.
+        # This keeps behavior as close as possible to `requests` without breaking the global client.
+        tmp = httpx.Client(
+            proxy=proxy,
+            event_hooks={"request": [hf_request_event_hook]},
+            follow_redirects=getattr(self, "follow_redirects", True),
+            timeout=getattr(self, "timeout", httpx.Timeout(constants.HF_HUB_DOWNLOAD_TIMEOUT, write=60.0)),
+        )
+        try:
+            return tmp.request(method, url, *args, **kwargs)
+        finally:
+            tmp.close()
+
+    def head(self, url: Any, *args, **kwargs) -> httpx.Response:
+        return self.request("HEAD", url, *args, **kwargs)
+
+    def get(self, url: Any, *args, **kwargs) -> httpx.Response:
+        return self.request("GET", url, *args, **kwargs)
+
+    def post(self, url: Any, *args, **kwargs) -> httpx.Response:
+        return self.request("POST", url, *args, **kwargs)
+
+    def put(self, url: Any, *args, **kwargs) -> httpx.Response:
+        return self.request("PUT", url, *args, **kwargs)
+
+    def patch(self, url: Any, *args, **kwargs) -> httpx.Response:
+        return self.request("PATCH", url, *args, **kwargs)
+
+    def delete(self, url: Any, *args, **kwargs) -> httpx.Response:
+        return self.request("DELETE", url, *args, **kwargs)
 
 
 CLIENT_FACTORY_T = Callable[[], httpx.Client]

@@ -46,7 +46,10 @@ import sys
 from typing import TYPE_CHECKING
 
 
-__version__ = "1.3.0.dev0"
+# NOTE: This repo vendors `huggingface_hub` with local patches.
+# `transformers` requires `huggingface-hub>=1.3.0,<2.0`; a `.dev0` version is a
+# prerelease and is considered < 1.3.0 by PEP 440.
+__version__ = "0.34.0.post1"
 
 # Alphabetical order of definitions is ensured in tests
 # WARNING: any comment added in this dictionary definition will be lost when

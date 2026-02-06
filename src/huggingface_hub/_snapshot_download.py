@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Iterable, List, Literal, Optional, Union, overload
+from typing import Any, Callable, Iterable, List, Literal, Optional, Union, overload
 
 import httpx
 from tqdm.auto import tqdm as base_tqdm
@@ -48,6 +48,7 @@ def snapshot_download(
     headers: Optional[dict[str, str]] = None,
     endpoint: Optional[str] = None,
     dry_run: Literal[False] = False,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> str: ...
 
 
@@ -73,6 +74,7 @@ def snapshot_download(
     headers: Optional[dict[str, str]] = None,
     endpoint: Optional[str] = None,
     dry_run: Literal[True] = True,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> list[DryRunFileInfo]: ...
 
 
@@ -98,6 +100,7 @@ def snapshot_download(
     headers: Optional[dict[str, str]] = None,
     endpoint: Optional[str] = None,
     dry_run: bool = False,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> Union[str, list[DryRunFileInfo]]: ...
 
 
@@ -123,6 +126,7 @@ def snapshot_download(
     headers: Optional[dict[str, str]] = None,
     endpoint: Optional[str] = None,
     dry_run: bool = False,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,  
 ) -> Union[str, list[DryRunFileInfo]]:
     """Download repo files.
 
@@ -189,7 +193,11 @@ def snapshot_download(
         dry_run (`bool`, *optional*, defaults to `False`):
             If `True`, perform a dry run without actually downloading the files. Returns a list of
             [`DryRunFileInfo`] objects containing information about what would be downloaded.
-
+        progress_cb (`Callable[[int, Optional[int], Optional[str]], None]`, *optional*):
+            A callback function to receive progress updates. The callback will be called with the following arguments:
+            - `downloaded_so_far`: The number of bytes downloaded so far.
+            - `total_or_none`: The total number of bytes to download, or `None` if unknown.
+            - `filename_or_none`: The name of the file being downloaded, or `None` if unknown.
     Returns:
         `str` or list of [`DryRunFileInfo`]:
             - If `dry_run=False`: Local snapshot path.
@@ -377,13 +385,64 @@ def snapshot_download(
 
     results: List[Union[str, DryRunFileInfo]] = []
 
-    # User can use its own tqdm class or the default one from `huggingface_hub.utils`
+    # User can use its own tqdm class or the default one from `huggingface_hub.utils`.
+    # If a progress callback is provided, wrap the tqdm class used for the aggregated
+    # bytes progress bar so each update/refresh also calls `progress_cb`.
     tqdm_class = tqdm_class or hf_tqdm
+    bytes_tqdm_class: type[base_tqdm] = tqdm_class  # type: ignore[assignment]
+    if progress_cb is not None:
+        cb = progress_cb
+
+        class _PatchedBytesTqdm(bytes_tqdm_class):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, **kwargs: Any):
+                super().__init__(*args, **kwargs)
+                try:
+                    total = getattr(self, "total", None)
+                    cb(int(getattr(self, "n", 0)), int(total) if total not in (None, 0) else None, None)
+                except Exception:
+                    pass
+
+            def update(self, n: Optional[Union[int, float]] = 1):  # type: ignore[override]
+                out = super().update(n)
+                try:
+                    total = getattr(self, "total", None)
+                    cb(int(getattr(self, "n", 0)), int(total) if total not in (None, 0) else None, None)
+                except Exception:
+                    pass
+                return out
+
+            def refresh(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+                out = super().refresh(*args, **kwargs)
+                try:
+                    total = getattr(self, "total", None)
+                    cb(int(getattr(self, "n", 0)), int(total) if total not in (None, 0) else None, None)
+                except Exception:
+                    pass
+                return out
+
+            def set_description(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+                out = super().set_description(*args, **kwargs)
+                try:
+                    total = getattr(self, "total", None)
+                    cb(int(getattr(self, "n", 0)), int(total) if total not in (None, 0) else None, None)
+                except Exception:
+                    pass
+                return out
+
+            def close(self):  # type: ignore[override]
+                try:
+                    total = getattr(self, "total", None)
+                    cb(int(getattr(self, "n", 0)), int(total) if total not in (None, 0) else None, None)
+                except Exception:
+                    pass
+                return super().close()
+
+        bytes_tqdm_class = _PatchedBytesTqdm
 
     # Create a progress bar for the bytes downloaded
     # This progress bar is shared across threads/files and gets updated each time we fetch
     # metadata for a file.
-    bytes_progress = tqdm_class(
+    bytes_progress = bytes_tqdm_class(
         desc="Downloading (incomplete total...)",
         disable=is_tqdm_disabled(log_level=logger.getEffectiveLevel()),
         total=0,
@@ -443,6 +502,7 @@ def snapshot_download(
                 headers=headers,
                 tqdm_class=_AggregatedTqdm,  # type: ignore
                 dry_run=dry_run,
+                progress_cb=progress_cb,
             )
         )
 

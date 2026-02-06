@@ -3316,8 +3316,16 @@ class HfApi:
 
         encoded_path_in_repo = "/" + quote(path_in_repo, safe="") if path_in_repo else ""
         tree_url = f"{self.endpoint}/api/{repo_type}s/{repo_id}/tree/{revision}{encoded_path_in_repo}"
-        for path_info in paginate(path=tree_url, headers=headers, params={"recursive": recursive, "expand": expand}):
-            yield (RepoFile(**path_info) if path_info["type"] == "file" else RepoFolder(**path_info))
+        try:
+            for path_info in paginate(path=tree_url, headers=headers, params={"recursive": recursive, "expand": expand}):
+                yield (RepoFile(**path_info) if path_info["type"] == "file" else RepoFolder(**path_info))
+        except RemoteEntryNotFoundError:
+            # Some downstream libraries (e.g. `transformers`) probe optional directories (like
+            # `additional_chat_templates/`) via `list_repo_tree`. If the directory doesn't exist,
+            # we should behave like an empty tree rather than raising.
+            if path_in_repo and path_in_repo.strip("/") == "additional_chat_templates":
+                return
+            raise
 
     @validate_hf_hub_args
     def verify_repo_checksums(

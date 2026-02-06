@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, NoReturn, Optional, Union, overload
 from urllib.parse import quote, urlparse
-
+from typing import Callable
 import httpx
 from tqdm.auto import tqdm as base_tqdm
 
@@ -569,6 +569,8 @@ def xet_get(
     # Truncate filename if too long to display
     if len(displayed_filename) > 40:
         displayed_filename = f"{displayed_filename[:40]}(…)"
+        
+    
 
     progress_cm = _get_progress_bar_context(
         desc=displayed_filename,
@@ -579,6 +581,7 @@ def xet_get(
         tqdm_class=tqdm_class,
         _tqdm_bar=_tqdm_bar,
     )
+
 
     with progress_cm as progress:
 
@@ -788,6 +791,7 @@ def hf_hub_download(
     endpoint: Optional[str] = None,
     tqdm_class: Optional[type[base_tqdm]] = None,
     dry_run: Literal[False] = False,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> str: ...
 
 
@@ -812,6 +816,7 @@ def hf_hub_download(
     endpoint: Optional[str] = None,
     tqdm_class: Optional[type[base_tqdm]] = None,
     dry_run: Literal[True] = True,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> DryRunFileInfo: ...
 
 
@@ -836,6 +841,7 @@ def hf_hub_download(
     endpoint: Optional[str] = None,
     tqdm_class: Optional[type[base_tqdm]] = None,
     dry_run: bool = False,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> Union[str, DryRunFileInfo]: ...
 
 
@@ -860,6 +866,7 @@ def hf_hub_download(
     endpoint: Optional[str] = None,
     tqdm_class: Optional[type[base_tqdm]] = None,
     dry_run: bool = False,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> Union[str, DryRunFileInfo]:
     """Download a given file if it's not already present in the local cache.
 
@@ -998,7 +1005,7 @@ def hf_hub_download(
         user_agent=user_agent,
         headers=headers,
     )
-
+    
     if local_dir is not None:
         return _hf_hub_download_to_local_dir(
             # Destination
@@ -1019,6 +1026,7 @@ def hf_hub_download(
             local_files_only=local_files_only,
             tqdm_class=tqdm_class,
             dry_run=dry_run,
+            progress_cb=progress_cb,
         )
     else:
         return _hf_hub_download_to_cache_dir(
@@ -1039,6 +1047,7 @@ def hf_hub_download(
             force_download=force_download,
             tqdm_class=tqdm_class,
             dry_run=dry_run,
+            progress_cb=progress_cb,
         )
 
 
@@ -1061,6 +1070,7 @@ def _hf_hub_download_to_cache_dir(
     force_download: bool,
     tqdm_class: Optional[type[base_tqdm]],
     dry_run: bool,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> Union[str, DryRunFileInfo]:
     """Download a given file to a cache folder, if not already present.
 
@@ -1068,7 +1078,7 @@ def _hf_hub_download_to_cache_dir(
     """
     locks_dir = os.path.join(cache_dir, ".locks")
     storage_folder = os.path.join(cache_dir, repo_folder_name(repo_id=repo_id, repo_type=repo_type))
-
+    
     # cross-platform transcription of filename, to be used as a local file path.
     relative_filename = os.path.join(*filename.split("/"))
     if os.name == "nt":
@@ -1195,6 +1205,8 @@ def _hf_hub_download_to_cache_dir(
 
     os.makedirs(os.path.dirname(blob_path), exist_ok=True)
     os.makedirs(os.path.dirname(pointer_path), exist_ok=True)
+    
+
 
     # if passed revision is not identical to commit_hash
     # then revision has to be a branch name or tag name.
@@ -1234,7 +1246,6 @@ def _hf_hub_download_to_cache_dir(
                 _create_symlink(blob_path, pointer_path, new_blob=False)
             return pointer_path
 
-    # Local file doesn't exist or etag isn't a match => retrieve file from remote (or cache)
 
     with WeakFileLock(lock_path):
         _download_to_tmp_and_move(
@@ -1248,6 +1259,7 @@ def _hf_hub_download_to_cache_dir(
             etag=etag,
             xet_file_data=xet_file_data,
             tqdm_class=tqdm_class,
+            progress_cb=progress_cb,
         )
         if not os.path.exists(pointer_path):
             _create_symlink(blob_path, pointer_path, new_blob=True)
@@ -1275,6 +1287,7 @@ def _hf_hub_download_to_local_dir(
     local_files_only: bool,
     tqdm_class: Optional[type[base_tqdm]],
     dry_run: bool,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> Union[str, DryRunFileInfo]:
     """Download a given file to a local folder, if not already present.
 
@@ -1444,6 +1457,8 @@ def _hf_hub_download_to_local_dir(
             local_path=str(paths.file_path),
             will_download=force_download or not is_cached,
         )
+        
+    
 
     # Otherwise, let's download the file!
     with WeakFileLock(paths.lock_path):
@@ -1459,6 +1474,7 @@ def _hf_hub_download_to_local_dir(
             etag=etag,
             xet_file_data=xet_file_data,
             tqdm_class=tqdm_class,
+            progress_cb=progress_cb,
         )
 
     write_download_metadata(local_dir=local_dir, filename=filename, commit_hash=commit_hash, etag=etag)
@@ -1822,6 +1838,7 @@ def _download_to_tmp_and_move(
     etag: Optional[str],
     xet_file_data: Optional[XetFileData],
     tqdm_class: Optional[type[base_tqdm]] = None,
+    progress_cb: Optional[Callable[[int, Optional[int], Optional[str]], None]] = None,
 ) -> None:
     """Download content from a URL to a destination path.
 
@@ -1859,15 +1876,61 @@ def _download_to_tmp_and_move(
             _check_disk_space(expected_size, incomplete_path.parent)
             _check_disk_space(expected_size, destination_path.parent)
 
+        # If a progress callback is provided, wrap the tqdm implementation so that each
+        # progress update also calls `progress_cb(current, total, filename)`.
+        patched_tqdm_class = tqdm_class
+        if tqdm_class is not None and progress_cb is not None:
+            cb = progress_cb
+            label = filename
+
+            class _PatchedTqdm(tqdm_class):  # type: ignore[misc, valid-type]
+                def __init__(self, *args: Any, **kwargs: Any):
+                    super().__init__(*args, **kwargs)
+                    try:
+                        cb(
+                            int(getattr(self, "n", 0)),
+                            int(self.total) if getattr(self, "total", None) is not None else None,
+                            label,
+                        )
+                    except Exception:
+                        pass
+
+                def update(self, n: int = 1):  # type: ignore[override]
+                    out = super().update(n)
+                    try:
+                        cb(
+                            int(getattr(self, "n", 0)),
+                            int(self.total) if getattr(self, "total", None) is not None else None,
+                            label,
+                        )
+                    except Exception:
+                        pass
+                    return out
+
+                def close(self):  # type: ignore[override]
+                    try:
+                        cb(
+                            int(getattr(self, "n", 0)),
+                            int(self.total) if getattr(self, "total", None) is not None else None,
+                            label,
+                        )
+                    except Exception:
+                        pass
+                    return super().close()
+
+            patched_tqdm_class = _PatchedTqdm
+            
+
         if xet_file_data is not None and is_xet_available():
             logger.debug("Xet Storage is enabled for this repo. Downloading file from Xet Storage..")
+ 
             xet_get(
                 incomplete_path=incomplete_path,
                 xet_file_data=xet_file_data,
                 headers=headers,
                 expected_size=expected_size,
                 displayed_filename=filename,
-                tqdm_class=tqdm_class,
+                tqdm_class=patched_tqdm_class,
             )
         else:
             if xet_file_data is not None and not constants.HF_HUB_DISABLE_XET:
@@ -1876,14 +1939,13 @@ def _download_to_tmp_and_move(
                     "Falling back to regular HTTP download. "
                     "For better performance, install the package with: `pip install huggingface_hub[hf_xet]` or `pip install hf_xet`"
                 )
-
             http_get(
                 url_to_download,
                 f,
                 resume_size=resume_size,
                 headers=headers,
                 expected_size=expected_size,
-                tqdm_class=tqdm_class,
+                tqdm_class=patched_tqdm_class,
             )
 
     logger.debug(f"Download complete. Moving file to {destination_path}")
